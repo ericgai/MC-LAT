@@ -1,9 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from numba import jit
-from datetime import datetime
 from celluloid import Camera
-import os
 
 
 @jit(nopython=True)
@@ -11,8 +9,8 @@ def seed():
     np.random.seed(0)
 
 class Lattice:
-    def __init__(self, save_dir=None, initial_state='all_zero', beta=0.05, Nx=20, mu=np.array([0., 0., 0., -20.]),
-                 N_samp=20, E=-15., bond_prob=0.5, write_config=True):
+    def __init__(self, save_dir=None, initial_state='random', beta=1., Nx=20, mu=np.array([0., 0., 0., 0.]),
+                 N_samp=20, E=-15., bond_prob=0.5, write_log=True):
         # Defined parameters
         self.beta = beta  # inverse temperature
         self.Nx = Nx  # number of lattice sites in each dimension
@@ -20,6 +18,7 @@ class Lattice:
         self.N_samp = N_samp  # collect a sample for trajectories every N_samp sweeps
         self.E = E  # bond energy, stabilizing bond has E<0
         self.bond_prob = bond_prob  # probability of attemptng to change the state of a bond in each Monte Carlo step
+        self.write_log = write_log # if True, outputs a .txt containing the parameters for the run
 
         # Derived parameters
         self.N = Nx ** 2  # total number of lattice sites
@@ -31,16 +30,20 @@ class Lattice:
             self.lattice_state = np.zeros((self.Nx, self.Nx), dtype=np.int8)
         elif initial_state == 'all_one':
             self.lattice_state = np.ones((self.Nx, self.Nx), dtype=np.int8)
+        elif initial_state == 'random':
+            self.lattice_state=np.random.randint(0,4,size=(self.Nx,self.Nx))
         else:
             raise NotImplementedError('given initial state is not implemented')
 
         self.lattice_trajectory = np.reshape(np.copy(self.lattice_state),(1, self.Nx, self.Nx))
         self.total_bonds = np.zeros_like(self.lattice_state)
+        self.bond_trajectory=np.reshape(np.copy(self.total_bonds),(1,self.Nx,self.Nx))
         self.bonds = np.zeros((self.Nx, self.Nx, 3), dtype=np.int8)
-        if write_config:
+        self.beta_trajectory =np.array([self.beta])
+        if write_log:
             f=open(self.save_dir+'config.txt','w')
-            f.write('beta={} Nx={} mu={} N_samp={} E={} bond_prob={}'.format(self.beta, self.Nx, self.mu, self.N_samp,
-                                                                             self.E, self.bond_prob))
+            f.write('Initial parameters: \nbeta={} Nx={} mu={} N_samp={} E={} bond_prob={} \n'.
+                    format(self.beta, self.Nx, self.mu, self.N_samp, self.E, self.bond_prob))
 
 
     def lattice_positions(self, side_length=1.):
@@ -66,10 +69,15 @@ class Lattice:
 
     def advance(self, iterations):
         # Uses the advance_lattice function to advance the lattice system through iterations Monte Carlo sweeps
-        self.lattice_state, self.bonds, self.total_bonds, lattice_trajectory=\
+        self.lattice_state, self.bonds, self.total_bonds, lattice_trajectory, bond_trajectory=\
             advance_lattice(self.lattice_state, self.N_samp, iterations, self.Nx, self.N,
                             self.beta, self.E, self.mu, self.bond_prob, self.bonds, self.total_bonds)
         self.lattice_trajectory=np.concatenate((self.lattice_trajectory,lattice_trajectory),axis=0)
+        self.bond_trajectory=np.concatenate((self.bond_trajectory,bond_trajectory),axis=0)
+        self.beta_trajectory=np.concatenate((self.beta_trajectory,np.full(len(lattice_trajectory),self.beta)))
+        if self.write_log:
+            f=open(self.save_dir+'config.txt','a')
+            f.write('advanced {} MC sweeps \n'.format(iterations))
 
     def phospho_trajectory(self):
         # Returns a trajectory of the phosphorylation states of a lattice given configurations of the lattice through
@@ -83,7 +91,12 @@ class Lattice:
 
     def phospho_state_positions(self, lattice):
         # Returns an array of the positions of the lattice sites and the corresponding phosphorylation state at each
-        # site given a lattice phosphorylation state.
+        # site given a lattice phosphorylation state. If an integer is passed for lattice, that frame in
+        # lattice_trajectory will be plotted.
+        if isinstance(lattice,int):
+            lattice=self.lattice_trajectory[lattice]
+        if lattice.ndim!=2:
+            lattice=lattice.reshape((self.Nx,self.Nx))
         state_position = np.zeros((self.N, 3))
         for i in range(self.Nx):
             for j in range(self.Nx):
@@ -98,21 +111,29 @@ class Lattice:
             state_position_trajectory[i] = self.phospho_state_positions(self.lattice_trajectory[i])
         return state_position_trajectory
 
-    def plot_phospho_trajectory(self):
+    def design_matrix(self):
+        n=self.lattice_trajectory.shape[0]
+        return np.reshape(np.copy(self.lattice_trajectory[1:]),(n-1, self.N))
+
+    def plot_phospho_trajectory(self, plot_naive_dist=False):
         # Plots and saves a given trajectory of phosphorylation states of the lattice.
         print('Plotting Phosphorylation State Trajectory')
+        clist=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
         phospho_state_trajectory=self.phospho_trajectory()
-        iterations = phospho_state_trajectory.shape[0] * self.N_samp
+        iterations = np.arange(0,phospho_state_trajectory.shape[0] * self.N_samp,self.N_samp)
+        combs = [1,4,7,8]
         plt.clf()
         for n in range(4):
-            plt.plot(np.arange(0, iterations, self.N_samp), phospho_state_trajectory[:, n], label='{} pY'.format(n))
+            plt.plot(iterations, phospho_state_trajectory[:, n], label='{} pY'.format(n), c=clist[n])
+            if plot_naive_dist:
+                    plt.plot(iterations, np.full(len(iterations),combs[n]/sum(combs)), c=clist[n], linestyle='dotted')
         plt.xlabel('MC Step')
         plt.ylabel('Population Fraction')
         plt.legend()
         plt.savefig(self.save_dir + 'phospho_state_trajectory.png')
-        return None
+        plt.clf()
 
-    def plot_lattice_trajectory_movie(self):
+    def plot_lattice_trajectory_movie(self, cmap='winter'):
         # Plots a movie of a lattice trajectory
         print('Plotting Movie')
         state_position_trajectory=self.phospho_state_position_trajectory()
@@ -122,18 +143,46 @@ class Lattice:
         camera = Camera(fig)
         # set up artist objects so that each plot shares the same legend regardless of the presence or absence of specific
         # phosphorylation states
-        scatter = plt.scatter([0, 0, 0, 0], [0, 0, 0, 0], c=[0, 1, 2, 3])
+        scatter = plt.scatter([0, 0, 0, 0], [0, 0, 0, 0], c=[0, 1, 2, 3], cmap=cmap)
         artists, _ = scatter.legend_elements()
         for state_position in state_position_trajectory:
-            plt.scatter(state_position[:, 0], state_position[:, 1], c=state_position[:, 2], vmin=0, vmax=3)
+            plt.scatter(state_position[:, 0], state_position[:, 1], c=state_position[:, 2], vmin=0, vmax=3, cmap=cmap)
             plt.legend(handles=artists, labels=['0 pY', '1 pY', '2 pY', '3 pY'], bbox_to_anchor=(1.05, 1))
             plt.tight_layout()
             camera.snap()
         animation = camera.animate(interval=500, blit=True)
         animation.save(self.save_dir + 'movie.gif', writer='imagemagick')
+        plt.clf()
+
+    def energy_trajectory(self):
+        return np.sum(self.bond_trajectory,axis=(1,2))/2
+
+    def plot_energy_trajectory(self):
+        energy_trajectory=self.energy_trajectory()
+        iterations = len(energy_trajectory) * self.N_samp
+        plt.clf()
+        plt.plot(np.arange(0, iterations, self.N_samp), energy_trajectory)
+        plt.xlabel('MC Step')
+        plt.ylabel('Total Bond Energy')
+        plt.savefig(self.save_dir + 'energy_trajectory.png')
+        plt.clf()
+
+    def change_temperature(self, new_beta):
+        self.beta=new_beta
+        if self.write_log:
+            f=open(self.save_dir+'config.txt','a')
+            f.write('changed beta to {} \n'.format(new_beta))
+
+    def change_potentials(self,new_mu):
+        self.mu = new_mu
+        if self.write_log:
+            f = open(self.save_dir + 'config.txt', 'a')
+            f.write('changed mu to {} \n'.format(new_mu))
+
 
 @jit(nopython=True)
 def mc_sweep(lattice, Nx, N, beta, E, mu, bond_prob, bonds, total_bonds):
+    # Performs a Monte Carlo sweep on a lattice given parameters of initial lattice, bonds, total_bonds.
     for _ in range(N):
         lattice_site = np.random.randint(0, N)
         x_i, y_i = (lattice_site // Nx, lattice_site % Nx)
@@ -205,29 +254,34 @@ def advance_lattice(lattice, N_samp, iterations, Nx, N, beta, E, mu, bond_prob, 
     print('Performing ' + str(iterations) + ' Monte Carlo sweeps')
     samples = iterations // N_samp
     lattice_trajectory = np.zeros((samples, Nx, Nx), dtype=np.int8)
+    bond_trajectory = np.zeros((samples, Nx, Nx), dtype=np.int8)
     for iteration in range(iterations):
         lattice, bonds, total_bonds=mc_sweep(lattice, Nx, N, beta, E, mu, bond_prob, bonds, total_bonds)
         if (iteration+1) % N_samp == 0:
             lattice_trajectory[iteration // N_samp] = lattice
-    return lattice, bonds, total_bonds, lattice_trajectory
+            bond_trajectory[iteration // N_samp] = total_bonds
+    return lattice, bonds, total_bonds, lattice_trajectory, bond_trajectory
 
+def plot_lattice(state_position, saveas, discrete=False, cmap='winter'):
+    # Plots a lattice given an array of positions and states of each lattice site. Saves the figure to the directory
+    # specified by saveas.
+    fig, ax = plt.subplots()
+    ax.axis('off')
+    ax.set_aspect('equal')
+    if discrete:
+        plt.scatter(state_position[:, 0], state_position[:, 1], c=state_position[:, 2], vmin=0, vmax=3, cmap=cmap)
+        scatter = plt.scatter([0, 0, 0, 0], [0, 0, 0, 0], c=[0, 1, 2, 3], cmap=cmap)
+        artists, _ = scatter.legend_elements()
+        plt.legend(handles=artists, labels=['0 pY', '1 pY', '2 pY', '3 pY'], bbox_to_anchor=(1.05, 1))
 
-# lattice = initialize_lattice('all_zero')
-# lattice_trajectory = mc_sweeps(lattice, bond_prob=0)
-# # if plot_trajectory:
-# #     phospho_state_trajectory = phospho_trajectory(lattice_trajectory)
-# #     plot_phospho_trajectory(phospho_state_trajectory)
-# # print('Final State of Lattice')
-# # print(lattice_trajectory[-1])
-# # # positions=lattice_positions()
-# # # state_position=phospho_state_positions(lattice_trajectory[-1],positions)
-# plot_lattice_trajectory_movie(lattice_trajectory)
+    else:
+        max=np.max(np.abs(state_position[:,2]))
+        if max<0.15:
+            max=0.15
+        plt.scatter(state_position[:, 0], state_position[:, 1], c=state_position[:, 2], vmin=-max, vmax=max, cmap=cmap)
+        plt.colorbar(label='Phosphates')
 
-seed()
-save_dir = 'experiments/{}/'.format(datetime.now().strftime("%Y_%m_%d_%H_%M"))
-if not os.path.isdir(save_dir):
-    os.mkdir(save_dir)
-sim_lattice = Lattice(save_dir)
-sim_lattice.advance(200)
-sim_lattice.plot_phospho_trajectory()
-sim_lattice.plot_lattice_trajectory_movie()
+    plt.tight_layout()
+    plt.savefig(saveas)
+    plt.clf()
+
